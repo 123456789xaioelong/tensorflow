@@ -58,13 +58,18 @@ static int64_t NextLargestMultiple(int64_t n, int64_t factor) {
 }
 
 SparseCoreLayoutStacker::SparseCoreLayoutStacker(int num_partitions,
-                                                 int sparse_cores_per_partition)
+                                                 int sparse_cores_per_partition,
+                                                 bool disable_table_stacking)
     : num_partitions_(num_partitions),
       sparse_cores_per_partition_(sparse_cores_per_partition),
       num_sparse_cores_(num_partitions_ * sparse_cores_per_partition_),
-      stacking_enabled_(!GetDisableTableStacking()),
+      stacking_enabled_(!disable_table_stacking),
       activation_mem_bytes_limit_(GetXlaSparseCoreStackingMemLimit()),
-      variable_shard_bytes_limit_(GetXlaSparseCoreStackingTableShardLimit()) {}
+      variable_shard_bytes_limit_(GetXlaSparseCoreStackingTableShardLimit()) {
+  // BEGIN GOOGLE-INTERNAL
+  stacking_enabled_ = !GetDisableTableStacking();
+  // END GOOGLE-INTERNAL
+}
 
 absl::Status SparseCoreLayoutStacker::AddTable(tsl::StringPiece table_name,
                                                int64_t table_height,

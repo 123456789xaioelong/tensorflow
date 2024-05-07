@@ -27,8 +27,9 @@ namespace py = pybind11;
 
 PYBIND11_MODULE(_pywrap_sparse_core_layout, m) {
   py::class_<SparseCoreLayoutStacker>(m, "SparseCoreLayoutStacker")
-      .def(py::init<int, int>(), py::arg("num_partitions"),
-           py::arg("sparse_cores_per_partition"))
+      .def(py::init<int, int, bool>(), py::arg("num_partitions"),
+           py::arg("sparse_cores_per_partition"),
+           py::arg("disable_table_stacking"))
       .def("SetActivationMemoryBytesLimit",
            &SparseCoreLayoutStacker::SetActivationMemoryBytesLimit)
       .def("SetVariableShardBytesLimit",
