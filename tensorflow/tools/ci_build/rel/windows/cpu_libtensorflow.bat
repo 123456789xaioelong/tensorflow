@@ -13,10 +13,37 @@
 :: limitations under the License.
 :: =============================================================================
 
-CALL tensorflow\tools\ci_build\release\common_win.bat
+set TF_DOCKER_IMAGE="gcr.io/tensorflow-testing/tf-win2019-rbe@sha256:1082ef4299a72e44a84388f192ecefc81ec9091c146f507bc36070c089c0edcc"
 
-call tensorflow\tools\ci_build\windows\cpu\bazel\run_libtensorflow.bat || exit /b 1
+docker pull %TF_DOCKER_IMAGE% || exit /b 1
+@echo *****Finished docker image pull: %date% %time%
 
-copy lib_package %TF_ARTIFACTS_DIR%\lib_package
+@echo Current dir is: %cd%
 
-CALL gsutil cp windows_cpu_libtensorflow_binaries.tar.gz gs://libtensorflow-nightly/prod/tensorflow/release/windows/latest/cpu
+docker run ^
+    --name tf ^
+    -itd ^
+    --rm ^
+    --env TF_PYTHON_VERSION=%TF_PYTHON_VERSION% ^
+    -v %cd%:c:\src\tensorflow
+    -v T:\tmp:C:\tmp ^
+    -v %KEYDIR%:C:\keys ^
+    -w c:\src\tensorflow ^
+    -e GOOGLE_APPLICATION_CREDENTIALS=%GUESTKEYNAME% ^
+    --dns 8.8.8.8 ^
+    --dns 8.8.4.4 ^
+    %TF_DOCKER_IMAGE% ^
+    bash || exit /b 1
+
+docker exec ak ^
+    bash -l %cd%/tensorflow/tools/ci_build/windows/libtensorflow_cpu.sh %* || exit /b 1
+
+
+set LIB_PACKAGE_ARTIFACT_DIR=%KOKORO_ARTIFACTS_DIR%\lib_package
+mkdir %LIB_PACKAGE_ARTIFACT_DIR%
+
+docker cp tf:c:\tf\libtensorflow_job\tensorflow\windows_cpu_libtensorflow_binaries.tar.gz %LIB_PACKAGE_ARTIFACT_DIR%
+
+dir %LIB_PACKAGE_ARTIFACT_DIR%
+
+REM CALL gsutil cp %KOKORO_ARTIFACTS_DIR%\windows_cpu_libtensorflow_binaries.tar.gz gs://libtensorflow-nightly/prod/tensorflow/release/windows/latest/cpu
