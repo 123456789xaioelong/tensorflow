@@ -262,6 +262,7 @@ cc_library(
         "//tsl/platform:logging",
         "//tsl/platform:macros",
         "//tsl/platform:types",
+        "//tsl/profiler/utils:no_init",
         "@com_google_absl//absl/strings",
     ] + if_not_android([
         "//tsl/profiler/backends/cpu:traceme_recorder",
