@@ -17,6 +17,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
 
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/statusor.h"
@@ -30,12 +31,44 @@ namespace xla {
 
 class HloCostAnalysis;
 
+struct InstructionAndShapeIndex {
+  InstructionAndShapeIndex(HloInstruction* instruction)
+      : instruction(instruction) {}
+  InstructionAndShapeIndex(HloInstruction* instruction, ShapeIndex shape_index)
+      : instruction(instruction), shape_index(shape_index) {}
+  HloInstruction* instruction;
+  ShapeIndex shape_index;
+  std::string ToString() const;
+
+  template <typename H>
+  static H Hash(H h, const InstructionAndShapeIndex& i) {
+    h = H::combine(std::move(h), i.instruction);
+    h = H::combine(std::move(h), i.shape_index);
+    return std::move(h);
+  }
+
+  template <typename H>
+  friend H AbslHashValue(H h, const InstructionAndShapeIndex& i) {
+    return InstructionAndShapeIndex::Hash(std::move(h), i);
+  }
+};
+
+bool operator==(const InstructionAndShapeIndex& lhs,
+                const InstructionAndShapeIndex& rhs);
+
 // This pass does "host memory offloading". If a tensor is annotated to be moved
 // to or from the host, this pass will remove the annotations and update each
 // tensor's layout with host memory spaces and insert copies if necessary. This
 // pass checks to make sure that no compute is done on the tensors annotated for
 // host memory offload; if there is compute, it is considered a user error and
 // an error will be returned.
+// The pass will "walk down" the Hlo graph starting from either MoveToHost
+// custom calls or from parameters with host memory space in their layout. All
+// tensors along each path have their memory space set as host memory space. If
+// a MoveToHost custom call is paired with a DynamicUpdateSlice, the
+// DynamicUpdateSlice will write into host memory space. Otherwise, a copy from
+// device to host will be inserted. All MoveToHost and MoveToDevice custom calls
+// are removed by the end of this pass.
 class HostOffloader : public HloModulePass {
  public:
   explicit HostOffloader(int64_t host_memory_space_color)
@@ -48,65 +81,41 @@ class HostOffloader : public HloModulePass {
   absl::StatusOr<bool> Run(
       HloModule* module,
       const absl::flat_hash_set<absl::string_view>& execution_threads) override;
-  static absl::Span<const HloOpcode> GetAllowedPositionOpcodes() {
-    return kAllowedPositionOpcodes;
-  }
 
  private:
   const int64_t kHostMemorySpaceColor;
-  std::unique_ptr<HloAliasAnalysis> alias_analysis_;
-  absl::flat_hash_set<HloInstruction*> found_host_to_device_annotations_;
-  absl::flat_hash_set<HloInstruction*> expected_host_to_device_annotations_;
-  absl::flat_hash_set<HloInstruction*> custom_calls_to_remove_;
-  absl::flat_hash_set<HloInstruction*> broadcasts_to_replace_;
-  absl::flat_hash_set<HloPosition> positions_to_move_to_host_memory_;
-  absl::flat_hash_set<HloInstruction*> annotations_for_copy_to_host_to_insert_;
   absl::flat_hash_set<HloInstruction*>
-      annotations_for_copy_to_device_to_insert_;
-  absl::flat_hash_set<HloInstruction*> dus_for_streamed_buffer_;
-  std::unique_ptr<CallGraph> call_graph_;
-
-  // Positions of all HloValues of the given HloBuffer will be added to
-  // positions_to_move_to_host_memory_.
-  void AddAllPositionsToBeMovedToHostMemory(const HloBuffer& unique_buffer);
-
-  // Process streamed inputs for the given computation, finding the relevant
-  // move-to-device custom calls and inserting the appropriate copies.
-  absl::Status HandleInputStreaming(HloComputation* computation);
-  // Process streamed outputs for the given computation, finding the relevant
-  // move-to-host custom calls and inserting the appropriate copies.
-  absl::Status HandleOutputStreaming(HloComputation* computation);
-  // From a unique buffer on host memory, finds move-to-device custom calls
-  // for this buffer and inserts the appropriate copies.
-  absl::Status HandleStreamedBuffer(const HloBuffer& unique_buffer);
-  // Creates a copy to device for the input streaming custom call.
-  absl::Status CreateCopyForInputStreaming(HloInstruction* custom_call);
-  absl::StatusOr<bool> TryParameterStreaming(HloInstruction* custom_call);
-  absl::StatusOr<bool> TryOutputStreaming(HloInstruction* custom_call);
-  absl::Status HandleMoveToHostCustomCall(HloInstruction* custom_call);
-
-  // Handle memory-only offloading where the data is written to the host via a
-  // dynamic-update-slice and is read back via a dynamic-slice.
-  absl::Status MemoryOnlyOffloadStartingWithDus(
-      const HloInstruction* dynamic_update_slice);
-
-  // Handle memory-only offloading where the data is written to the host via a
-  // copy and is read back via a copy.
-  absl::Status MemoryOnlyOffloadStartingWithCopy(const HloInstruction* copy);
-
-  // Handle memory-only offloading where there are no ops yet for data movement.
-  // We will insert copies at the points where the annotations are.
-  absl::Status MemoryOnlyOffloadInsertCopies(HloInstruction* custom_call);
+      already_visited_move_to_host_custom_calls_;
+  absl::flat_hash_set<HloInstruction*> dynamic_update_slices_already_handled_;
+  absl::flat_hash_map<HloInstruction*, HloInstruction*> copies_created_after_;
+  absl::flat_hash_set<InstructionAndShapeIndex> already_inserted_copy_before_;
 
   absl::Status DynamifySlice(HloInstruction* slice);
-
-  static constexpr std::array kAllowedPositionOpcodes = {
-      HloOpcode::kBitcast,
-      HloOpcode::kGetTupleElement,
-      HloOpcode::kOptimizationBarrier,
-      HloOpcode::kParameter,
-      HloOpcode::kTuple,
-      HloOpcode::kWhile};
+  bool IsValidDuringPureMemoryOffload(const HloInstruction* instruction) const;
+  bool InstructionIsAllowedBetweenMoveToHostAndDus(
+      const HloInstruction* instruction) const;
+  bool InstructionIsAllowedBetweenDsAndMoveToDevice(
+      const HloInstruction* instruction) const;
+  absl::StatusOr<bool> HandleInputStreaming(HloComputation* entry_computation);
+  absl::StatusOr<bool> HandleMoveToHostCustomCall(
+      HloInstruction* custom_call_instruction);
+  absl::StatusOr<bool> HandleMoveToDeviceCustomCall(
+      HloInstruction* custom_call_instruction);
+  absl::Status CreateAllocateBufferForDynamicUpdateSlice(
+      HloInstruction* dynamic_update_slice);
+  absl::Status ValidateSliceLeadsToMoveToDeviceCustomCall(
+      HloInstruction* instruction) const;
+  absl::StatusOr<bool> WalkDownHostMemoryOffloadPaths(
+      const InstructionAndShapeIndex& starting_instruction_and_index,
+      bool insert_copy_before);
+  std::vector<InstructionAndShapeIndex> GetStartingInstructions(
+      HloInstruction* custom_call_instruction);
+  absl::StatusOr<bool> InsertCopyBetween(
+      const InstructionAndShapeIndex& before_instruction_and_index,
+      const InstructionAndShapeIndex& after_instruction_and_index);
+  absl::StatusOr<bool> ApplySchedulingFix(
+      HloModule* module,
+      const absl::flat_hash_set<absl::string_view>& execution_threads);
 };
 
 }  // namespace xla
