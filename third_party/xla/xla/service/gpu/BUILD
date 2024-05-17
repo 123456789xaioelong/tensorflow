@@ -1676,7 +1676,7 @@ xla_test(
     srcs = if_gpu_is_configured(["gemm_algorithm_picker_test.cc"]),
     backends = [
         "gpu_v100",
-    ] + if_oss(["gpu_any"]),
+    ],
     deps = [
         ":autotuner_util",
         ":backend_configs_cc",
@@ -1973,7 +1973,7 @@ xla_test(
     srcs = if_gpu_is_configured(["conv_algorithm_picker_test.cc"]),
     backends = [
         "gpu_v100",
-    ] + if_oss(["gpu_any"]),
+    ],
     tags = [
         "noasan",
         "nomsan",
