@@ -71,7 +71,8 @@ static constexpr absl::string_view kEntryFuncName = "main";
 absl::Status UpdateCompileMetadata(
     tensorflow::tpu::TPUCompileMetadataProto& metadata,
     absl::Span<const DtypeAndShape> inputs) {
-  VLOG(3) << "TpuCompileMetadata before shape is populated " << metadata;
+  VLOG(3) << "TpuCompileMetadata before shape is populated "
+          << metadata.DebugString();
   if (metadata.num_replicas() < 1 || metadata.num_cores_per_replica() < 1) {
     return absl::InternalError(
         absl::StrCat("Number of replicas ", metadata.num_replicas(),
