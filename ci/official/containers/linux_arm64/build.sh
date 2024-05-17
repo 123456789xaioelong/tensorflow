@@ -40,11 +40,17 @@ else
   fi
 fi
 
+if [[ -z "${TFCI_ARTIFACT_REGISTRY_ENABLE}" ]]; then
+  BASE_IMAGE_PATH="gcr.io/tensorflow-sigs/build-arm64"
+else
+  BASE_IMAGE_PATH="us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/build-arm64"
+fi
+
 # Build for both JAX and TF usage.  We do these in one place because they share
 # almost all of the same cache layers
 export DOCKER_BUILDKIT=1
 for target in jax tf; do
-  IMAGE="gcr.io/tensorflow-sigs/build-arm64:$target-$TAG"
+  IMAGE="$BASE_IMAGE_PATH:$target-$TAG"
   docker pull "$IMAGE" || true
   # Due to some flakiness of resources pulled in the build, allow the docker
   # command to reattempt build a few times in the case of failure (b/302558736)
@@ -64,7 +70,12 @@ for target in jax tf; do
   set -e
 
   if [[ -n "$KOKORO_BUILD_ID" ]]; then
-    gcloud auth configure-docker
+    if [[ -z "${TFCI_ARTIFACT_REGISTRY_ENABLE}" ]]; then
+      gcloud auth configure-docker
+    else
+      gcloud auth configure-docker us-central1-docker.pkg.dev
+    fi
+
     docker push "$IMAGE"
   fi
 done
