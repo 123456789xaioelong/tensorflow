@@ -1888,7 +1888,7 @@ class FromSavedModelTest(lite_v2_test_util.ModelTest):
     input_details = interp.get_input_details()
     output_details = interp.get_output_details()
 
-    input_data = np.array(['a', 'b', 'c', 'z'], dtype=np.string_)
+    input_data = np.array(['a', 'b', 'c', 'z'], dtype=np.bytes_)
     interp.resize_tensor_input(input_details[0]['index'], [4], strict=False)
     interp.allocate_tensors()
 
@@ -1982,7 +1982,7 @@ class FromSavedModelTest(lite_v2_test_util.ModelTest):
     input_details = interp.get_input_details()
     output_details = interp.get_output_details()
 
-    input_data = np.array(['a', 'b', 'c'], dtype=np.string_)
+    input_data = np.array(['a', 'b', 'c'], dtype=np.bytes_)
     interp.resize_tensor_input(input_details[0]['index'], [3], strict=False)
     interp.allocate_tensors()
 
