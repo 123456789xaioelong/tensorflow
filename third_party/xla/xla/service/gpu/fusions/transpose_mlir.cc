@@ -87,15 +87,18 @@ Tiling ComputeTransposeTiling(const TransposeDescription& tiled_transpose) {
   // always use the permutation, even when we want the inverse.
   CHECK((permutation == Vector3{0, 2, 1}) || (permutation == Vector3{2, 1, 0}));
 
-  absl::InlinedVector<int64_t, 4> input_dims{transposed_dims[permutation[0]],
-                                             transposed_dims[permutation[1]],
-                                             transposed_dims[permutation[2]]};
+  int vector_size = 2;
+  absl::InlinedVector<int64_t, 4> input_dims{
+      transposed_dims[permutation[0]], transposed_dims[permutation[1]],
+      transposed_dims[permutation[2]] / vector_size, vector_size};
 
   // We tile along the minor dimensions pre- and post-transpose.
-  absl::InlinedVector<int64_t, 4> tile_sizes{1, 1, 1};
+  absl::InlinedVector<int64_t, 4> tile_sizes{1, 1, 1, vector_size};
   tile_sizes[permutation[2]] = WarpSize() / kNumRows;
-  absl::InlinedVector<int64_t, 4> num_threads{1, 1, WarpSize()};
-  num_threads[permutation[2]] = kNumRows;
+  absl::InlinedVector<int64_t, 4> num_threads{1, 1, WarpSize(), 1};
+  // The Blocks must be square, so increase the number of threads in case of
+  // vectorization. Effectively, this changes blocks from 32*32 to 64*64.
+  num_threads[permutation[2]] = kNumRows * vector_size;
 
   return Tiling(input_dims, tile_sizes, num_threads);
 }
@@ -126,13 +129,28 @@ MlirTransposeFusion::MlirTransposeFusion(const HloFusionAnalysis& analysis)
 std::optional<IndexingMap> MlirTransposeFusion::ComputeThreadIdToOutputIndexing(
     int64_t root_index, MLIRContext* mlir_context) const {
   const auto& hero = analysis_.fusion_hero(root_index).instruction();
-  // The block offsets are permuted, but the thread offsets remain the same.
+  std::vector<int64_t> p{permutation_.begin(), permutation_.end()};
+  p.push_back(3);
+  // The block offsets are permuted and adjusted for vectorization.
   auto block_offset = GetBlockOffsetsForTiling(tiling_, mlir_context)
-                          .getSubMap(std::vector<unsigned>{permutation_.begin(),
-                                                           permutation_.end()});
+                          .getSubMap(std::vector<unsigned>(p.begin(), p.end()));
   auto thread_offset = GetThreadOffsetsForTiling(tiling_, mlir_context);
-  auto permuted_tiled_shape =
-      ShapeUtil::MakeShape(U8, Permute(tiling_.GetShape(), permutation_));
+  auto permuted_dims = Permute(tiling_.GetShape(), p);
+
+  // The vectorized dimension needs to be adjusted: it's always the last one.
+  int vector_size = tiling_.GetThreadTileSize()[3];
+  CHECK_EQ(permuted_dims[2] % vector_size, 0);
+  permuted_dims[2] /= vector_size;
+  permuted_dims[permutation_[2]] *= vector_size;
+
+  auto block_offsets = llvm::to_vector(block_offset.getResults());
+  block_offsets[2] = block_offsets[2].floorDiv(vector_size);
+  block_offsets[permutation_[2]] = block_offsets[permutation_[2]] * vector_size;
+  block_offset =
+      AffineMap::get(block_offset.getNumDims(), block_offset.getNumSymbols(),
+                     block_offsets, mlir_context);
+
+  auto permuted_tiled_shape = ShapeUtil::MakeShape(U8, permuted_dims);
 
   auto map = ComposeIndexingMaps(
       GetIndexingMapForTiling(
@@ -178,10 +196,13 @@ IndexingMap GetSharedMemoryWriteIndexingMap(
 
   AffineExpr c0 = mlir::getAffineConstantExpr(0, mlir_context);
   AffineExpr th_x = mlir::getAffineDimExpr(0, mlir_context);
-  SmallVector<AffineExpr, 3> tile_sizes(3);
-  mlir::bindSymbolsList(mlir_context, llvm::MutableArrayRef(tile_sizes));
+  constexpr int kVectorDim = 3;
+  SmallVector<AffineExpr, 4> tile_indices(4);
+  mlir::bindSymbolsList(mlir_context, llvm::MutableArrayRef(tile_indices));
+  int vector_size = thread_id_indexing.GetRangeVar(kVectorDim).range.upper + 1;
   SmallVector<AffineExpr, 3> shared_memory_indices = {
-      th_x.floorDiv(32) + 4 * tile_sizes[loop_dim], th_x % 32};
+      th_x.floorDiv(32) + vector_size * 4 * tile_indices[loop_dim],
+      (th_x % 32) * vector_size + tile_indices[kVectorDim]};
   for (auto [index, range_val] :
        llvm::enumerate(thread_id_indexing.GetRangeVars())) {
     if (range_val.range.NumElements() == 1) {
@@ -220,7 +241,9 @@ MlirTransposeFusion::WriteResult MlirTransposeFusion::EmitWriteToShMemMlir(
     const CallTargetProvider& call_target_provider,
     ValueRange output_args) const {
   std::vector<int64_t> shmem_tensor_size(tiling_.GetBlockTileSize().begin(),
-                                         tiling_.GetBlockTileSize().end());
+                                         tiling_.GetBlockTileSize().end() - 1);
+  // Merge the vector size into the last dimension.
+  shmem_tensor_size.back() *= tiling_.GetThreadTileSize().back();
   // Avoid bank conflict.
   ++shmem_tensor_size.back();
 
